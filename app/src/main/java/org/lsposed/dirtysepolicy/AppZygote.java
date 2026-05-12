@@ -24,10 +24,12 @@ public final class AppZygote implements ZygotePreload {
 
     // Native methods for enhanced detection
     static native String nativeWriteAttrProbe(String context);
+    static native String nativeWriteAttrProbePath(String path, String context);
     static native String nativeScanMounts();
     static native String nativeScanEnv();
     static native String nativeScanFiles();
-    static native String nativeRandomizedDomainProbe();
+    static native String nativeScanPolicy();
+    static native String nativeScanProcesses();
     static native String nativeFullScan();
     private static final String KSU_CONTEXT = "u:r:ksu:s0";
     private static final String KSU_FILE_CONTEXT = "u:r:ksu_file:s0";
@@ -86,13 +88,17 @@ public final class AppZygote implements ZygotePreload {
             result = "ERROR: cannot check SELinux access";
             return;
         }
+        
+        var sb = new StringBuilder();
+        
+        // Phase 1: Direct procattr probes (may be blocked by KSU PR#3459)
         ksuProcAttrCurrentResult = runProcAttrCurrentProbe(KSU_CONTEXT);
         ksuFileProcAttrCurrentResult = runProcAttrCurrentProbe(KSU_FILE_CONTEXT);
         magiskProcAttrCurrentResult = runProcAttrCurrentProbe(MAGISK_CONTEXT);
         magiskFileProcAttrCurrentResult = runProcAttrCurrentProbe(MAGISK_FILE_CONTEXT);
         lsposedFileProcAttrCurrentResult = runProcAttrCurrentProbe(LSPOSED_FILE_CONTEXT);
         xposedDataProcAttrCurrentResult = runProcAttrCurrentProbe(XPOSED_DATA_CONTEXT);
-        var sb = new StringBuilder();
+        
         if (ksuProcAttrCurrentResult.detected() || ksuFileProcAttrCurrentResult.detected()) {
             sb.append("found KernelSU; ");
         }
@@ -105,6 +111,22 @@ public final class AppZygote implements ZygotePreload {
         if (xposedDataProcAttrCurrentResult.detected()) {
             sb.append("found Xposed; ");
         }
+        
+        // Phase 2: Procattr bypass probes (bypasses KSU setprocattr hook)
+        // KSU PR#3459 only hooks "current", not "fscreate"/"sockcreate"/"keycreate"
+        var ksuFscreate = runProcAttrPathProbe("/proc/self/attr/fscreate", KSU_CONTEXT);
+        var ksuSockcreate = runProcAttrPathProbe("/proc/self/attr/sockcreate", KSU_CONTEXT);
+        var magiskFscreate = runProcAttrPathProbe("/proc/self/attr/fscreate", MAGISK_CONTEXT);
+        var magiskSockcreate = runProcAttrPathProbe("/proc/self/attr/sockcreate", MAGISK_CONTEXT);
+        
+        if (ksuFscreate.detected() || ksuSockcreate.detected()) {
+            sb.append("found KernelSU (procattr bypass); ");
+        }
+        if (magiskFscreate.detected() || magiskSockcreate.detected()) {
+            sb.append("found Magisk (procattr bypass); ");
+        }
+        
+        // Phase 3: SELinux permission audits
         if (SELinux.checkSELinuxAccess("u:r:system_server:s0", "u:r:system_server:s0", "process", "execmem")) {
             sb.append("system_server can execmem; ");
         }
@@ -133,17 +155,25 @@ public final class AppZygote implements ZygotePreload {
             sb.append("found ZygiskNext; ");
         }
 
-        // Native layer detection (bypasses Java hooks)
+        // Phase 4: Native layer detection (bypasses Java hooks)
         String nativeResult = nativeFullScan();
-        if (nativeResult.contains("SUCCESS")) {
-            sb.append("native context probe succeeded; ");
-        }
         if (nativeResult.contains("DETECTED")) {
             sb.append("native scan detected artifacts; ");
         }
+        
+        // Phase 5: Policy binary scan (bypasses KSU PR#3459 completely)
+        String policyResult = nativeScanPolicy();
+        if (policyResult.contains("DETECTED")) {
+            sb.append("policy scan detected; ");
+        }
+        
+        // Phase 6: Process scan (find magiskd/zygiskd regardless of domain name)
+        String procResult = nativeScanProcesses();
+        if (procResult.contains("DETECTED")) {
+            sb.append("suspicious processes detected; ");
+        }
 
-        // Check for randomized domain side effects
-        // Even if domain name is random, mount/env/file artifacts remain
+        // Phase 7: Side-effect scans
         String mountResult = nativeScanMounts();
         if (mountResult.contains("DETECTED")) {
             sb.append("magisk mounts detected; ");
@@ -219,7 +249,11 @@ public final class AppZygote implements ZygotePreload {
     }
 
     private static ProcAttrCurrentResult runProcAttrCurrentProbe(String targetContext) {
-        try (var out = new FileOutputStream("/proc/self/attr/current")) {
+        return runProcAttrPathProbe("/proc/self/attr/current", targetContext);
+    }
+
+    private static ProcAttrCurrentResult runProcAttrPathProbe(String path, String targetContext) {
+        try (var out = new FileOutputStream(path)) {
             Os.write(out.getFD(), targetContext.getBytes(StandardCharsets.UTF_8), 0, targetContext.getBytes(StandardCharsets.UTF_8).length);
             return ProcAttrCurrentResult.success(targetContext, "write succeeded");
         } catch (SecurityException e) {
