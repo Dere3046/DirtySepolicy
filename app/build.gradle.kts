@@ -29,6 +29,19 @@ android {
     buildFeatures {
         aidl = true
     }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-O3 -fvisibility=hidden -fvisibility-inlines-hidden"
+                arguments += "-DANDROID_STL=c++_static"
+            }
+        }
+    }
     packaging {
         resources {
             excludes += "**"

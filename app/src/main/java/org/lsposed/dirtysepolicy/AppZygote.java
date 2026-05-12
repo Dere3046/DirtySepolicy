@@ -18,6 +18,17 @@ import java.util.HashMap;
 import java.util.Map;
 
 public final class AppZygote implements ZygotePreload {
+    static {
+        System.loadLibrary("dirtysepolicy");
+    }
+
+    // Native methods for enhanced detection
+    static native String nativeWriteAttrProbe(String context);
+    static native String nativeScanMounts();
+    static native String nativeScanEnv();
+    static native String nativeScanFiles();
+    static native String nativeRandomizedDomainProbe();
+    static native String nativeFullScan();
     private static final String KSU_CONTEXT = "u:r:ksu:s0";
     private static final String KSU_FILE_CONTEXT = "u:r:ksu_file:s0";
     private static final String MAGISK_CONTEXT = "u:r:magisk:s0";
@@ -121,6 +132,31 @@ public final class AppZygote implements ZygotePreload {
         if (SELinux.checkSELinuxAccess("u:r:zygote:s0", "u:object_r:adb_data_file:s0", "dir", "search")) {
             sb.append("found ZygiskNext; ");
         }
+
+        // Native layer detection (bypasses Java hooks)
+        String nativeResult = nativeFullScan();
+        if (nativeResult.contains("SUCCESS")) {
+            sb.append("native context probe succeeded; ");
+        }
+        if (nativeResult.contains("DETECTED")) {
+            sb.append("native scan detected artifacts; ");
+        }
+
+        // Check for randomized domain side effects
+        // Even if domain name is random, mount/env/file artifacts remain
+        String mountResult = nativeScanMounts();
+        if (mountResult.contains("DETECTED")) {
+            sb.append("magisk mounts detected; ");
+        }
+        String envResult = nativeScanEnv();
+        if (envResult.contains("DETECTED")) {
+            sb.append("magisk env detected; ");
+        }
+        String fileResult = nativeScanFiles();
+        if (fileResult.contains("DETECTED")) {
+            sb.append("magisk files detected; ");
+        }
+
         if (sb.length() == 0) {
             result = "OK: no dirty sepolicy found";
         } else {
@@ -133,6 +169,7 @@ public final class AppZygote implements ZygotePreload {
                     + magiskFileProcAttrCurrentResult.formatMultiline("A magisk_file") + "\n\n"
                     + lsposedFileProcAttrCurrentResult.formatMultiline("A lsposed_file") + "\n\n"
                     + xposedDataProcAttrCurrentResult.formatMultiline("A xposed_data") + "\n\n"
+                    + "Native Scan:\n" + nativeFullScan() + "\n\n"
                     + result + "\n\n\n\n";
         }
     }
